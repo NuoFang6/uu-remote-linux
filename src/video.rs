@@ -126,8 +126,13 @@ fn hevc_au_offsets(bytes: &[u8]) -> Vec<usize> {
         if let Some(kind) = hevc_nal_kind(bytes, header) {
             let vcl = kind < 32;
             let starts_picture = vcl && bytes.get(header + 2).is_some_and(|byte| byte & 0x80 != 0);
-            if first || (previous_vcl && (!vcl || starts_picture)) { result.push(i); }
-            previous_vcl = vcl;
+            // RFC 7798 / H.265 7.4.2.4.4: only these non-VCL types may open the next access unit.
+            // Suffix SEI (40), filler (38) and end of sequence/bitstream (36, 37) stay with the
+            // picture they follow.
+            let opens_unit = matches!(kind, 32..=35 | 39 | 41..=44 | 48..=55);
+            if first || (previous_vcl && (opens_unit || starts_picture)) { result.push(i); }
+            // Trailing NALs (suffix SEI, filler, end markers) do not end "after a VCL NAL".
+            if vcl || opens_unit { previous_vcl = vcl; }
             first = false;
         }
         i += prefix;
@@ -1288,6 +1293,8 @@ mod tests {
         assert_eq!(hevc_au_offsets(&[0,0,1,70]), Vec::<usize>::new());
         assert_eq!(hevc_au_offsets(&[0,0,1,128,1,0x80]), Vec::<usize>::new());
         assert_eq!(hevc_au_offsets(&[0,0,1,128,1,0x80, 0,0,1,2,1,0x80]), vec![6]);
+        // A suffix SEI (40) after a picture stays in that picture's unit; the next slice opens the next one.
+        assert_eq!(hevc_au_offsets(&[0,0,1,0x26,1,0x80, 0,0,1,0x50,1,0x05, 0,0,1,0x02,1,0x80]), vec![0, 12]);
     }
     #[tokio::test]
     async fn hevc_dependency_gate_recovers_only_at_irap_after_overflow() {
